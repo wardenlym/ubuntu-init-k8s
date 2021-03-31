@@ -311,6 +311,7 @@ EOF
 gen_kubeadm_config() {
   cat>kubeadm-initconfig.yaml<<EOF
 apiVersion: kubeadm.k8s.io/v1beta2
+kind: InitConfiguration
 bootstrapTokens:
 - groups:
   - system:bootstrappers:kubeadm:default-node-token
@@ -319,35 +320,94 @@ bootstrapTokens:
   usages:
   - signing
   - authentication
-kind: InitConfiguration
 localAPIEndpoint:
-  advertiseAddress: 1.2.3.4
+  advertiseAddress: 172.29.50.31                          # 本节点宣告ip地址
   bindPort: 6443
 nodeRegistration:
   criSocket: /var/run/dockershim.sock
-  name: node-50
+  name: master-01
   taints:
   - effect: NoSchedule
     key: node-role.kubernetes.io/master
 ---
+apiVersion: kubeadm.k8s.io/v1beta2
+kind: ClusterConfiguration
+clusterName: kubernetes
+certificatesDir: /etc/kubernetes/pki
+imageRepository: registry.aliyuncs.com/google_containers  # 修改国内镜像源
+controlPlaneEndpoint: "172.29.50.30:6443"                 # apiserver负载均衡地址和端口
+kubernetesVersion: v1.19.7                                # 选择k8s版本
+networking:
+  dnsDomain: cluster.local
+  serviceSubnet: 10.96.0.0/12
+  podSubnet: "10.44.0.0/16"                               # 修改子网地址
 apiServer:
   timeoutForControlPlane: 4m0s
-apiVersion: kubeadm.k8s.io/v1beta2
-certificatesDir: /etc/kubernetes/pki
-clusterName: kubernetes
-controllerManager: {}
+  extraArgs:
+    authorization-mode: "Node,RBAC"
+    enable-admission-plugins: "NamespaceLifecycle,LimitRanger,ServiceAccount,PersistentVolumeClaimResize,DefaultStorageClass,DefaultTolerationSeconds,NodeRestriction,MutatingAdmissionWebhook,ValidatingAdmissionWebhook,ResourceQuota,Priority,PodPreset"
+    runtime-config: api/all=true
+    storage-backend: etcd3
+    etcd-servers: https://172.19.0.2:2379,https://172.19.0.3:2379,https://172.19.0.4:2379
+controllerManager:
+  extraArgs:
+    bind-address: "0.0.0.0"
+    experimental-cluster-signing-duration: 87600h        # 证书过期时间修改为10年
+  extraVolumes:
+  - hostPath: /etc/localtime
+    mountPath: /etc/localtime
+    name: localtime
+    readOnly: true
+scheduler:
+  extraArgs:
+    bind-address: "0.0.0.0"
+  extraVolumes:
+  - hostPath: /etc/localtime
+    mountPath: /etc/localtime
+    name: localtime
+    readOnly: true
 dns:
   type: CoreDNS
 etcd:
   local:
+    imageRepository: quay.io/coreos #如果不单独指定，默认会去找aliyun的imageRepository
+    imageTag: v3.4.13
     dataDir: /var/lib/etcd
-imageRepository: k8s.gcr.io
-kind: ClusterConfiguration
-kubernetesVersion: v1.19.7                   # 
-networking:
-  dnsDomain: cluster.local
-  serviceSubnet: 10.96.0.0/12
-scheduler: {}
+    extraArgs: # 暂时没有extraVolumes
+      auto-compaction-retention: "1h"
+      max-request-bytes: "33554432"
+      quota-backend-bytes: "8589934592"
+      enable-v2: "false"                                  # disable etcd v2 api
+  # external: //外部etcd的时候这样配置 https://godoc.org/k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta2#Etcd
+    # endpoints:
+    # - "https://172.19.0.2:2379"
+    # - "https://172.19.0.3:2379"
+    # - "https://172.19.0.4:2379"
+    # caFile: "/etc/kubernetes/pki/etcd/ca.crt"
+    # certFile: "/etc/kubernetes/pki/etcd/etcd.crt"
+    # keyFile: "/etc/kubernetes/pki/etcd/etcd.key"
+---
+apiVersion: kubeproxy.config.k8s.io/v1alpha1
+kind: KubeProxyConfiguration # https://godoc.org/k8s.io/kube-proxy/config/v1alpha1#KubeProxyConfiguration
+mode: ipvs
+featureGates:
+  SupportIPVSProxyMode: true                              # 开启ipvs模式
+metricsBindAddress: "0.0.0.0:10249"                       # 开启默认监听metrics地址
+ipvs:
+  excludeCIDRs: null
+  minSyncPeriod: 0s
+  scheduler: "rr"                                         # 调度算法
+  syncPeriod: 15s
+iptables:
+  masqueradeAll: true
+  masqueradeBit: 14
+  minSyncPeriod: 0s
+  syncPeriod: 30s
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration # https://godoc.org/k8s.io/kubelet/config/v1beta1#KubeletConfiguration
+cgroupDriver: systemd
+failSwapOn: true # 如果开启swap则设置为false
 EOF
 }
 
@@ -363,7 +423,7 @@ EOF
 #load_module_ipvs
 #load_k8s_sysctl
 
-setting_limit
+#setting_limit
 
 gen_kubeadm_config
 
