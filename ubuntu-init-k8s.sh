@@ -295,6 +295,16 @@ EOF
   sysctl --system
 }
 
+setting_system_conf() {
+  exit -1
+  # 还没确定是否需要
+  #cat /etc/systemd/system.conf
+# DefaultLimitCORE=102400
+# DefaultLimitNOFILE=102400
+# DefaultLimitNPROC=102400
+
+}
+
 setting_limit() {
   cat>/etc/security/limits.d/kubernetes.conf<<EOF
 *       soft    nproc   131072
@@ -310,7 +320,7 @@ EOF
 
 gen_kubeadm_config() {
   cat>kubeadm-initconfig.yaml<<EOF
-apiVersion: kubeadm.k8s.io/v1beta2
+apiVersion: kubeadm.k8s.io/v1beta2 # https://godoc.org/k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta2
 kind: InitConfiguration
 bootstrapTokens:
 - groups:
@@ -321,11 +331,11 @@ bootstrapTokens:
   - signing
   - authentication
 localAPIEndpoint:
-  advertiseAddress: 172.29.50.31                          # 本节点宣告ip地址
+  advertiseAddress: 172.29.50.52                          # 本节点宣告ip地址
   bindPort: 6443
 nodeRegistration:
   criSocket: /var/run/dockershim.sock
-  name: master-01
+  name: node-50
   taints:
   - effect: NoSchedule
     key: node-role.kubernetes.io/master
@@ -335,21 +345,33 @@ kind: ClusterConfiguration
 clusterName: kubernetes
 certificatesDir: /etc/kubernetes/pki
 imageRepository: registry.aliyuncs.com/google_containers  # 修改国内镜像源
-controlPlaneEndpoint: "172.29.50.30:6443"                 # apiserver负载均衡地址和端口
+controlPlaneEndpoint: "172.29.50.51:6443"                 # apiserver负载均衡的域名或者vip和端口
 kubernetesVersion: v1.19.7                                # 选择k8s版本
-networking:
+networking:  #https://godoc.org/k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta2#Networking
   dnsDomain: cluster.local
   serviceSubnet: 10.96.0.0/12
   podSubnet: "10.44.0.0/16"                               # 修改子网地址
-apiServer:
+apiServer: # https://godoc.org/k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta2#APIServer
   timeoutForControlPlane: 4m0s
   extraArgs:
     authorization-mode: "Node,RBAC"
     enable-admission-plugins: "NamespaceLifecycle,LimitRanger,ServiceAccount,PersistentVolumeClaimResize,DefaultStorageClass,DefaultTolerationSeconds,NodeRestriction,MutatingAdmissionWebhook,ValidatingAdmissionWebhook,ResourceQuota,Priority,PodPreset"
     runtime-config: api/all=true
     storage-backend: etcd3
-    etcd-servers: https://172.19.0.2:2379,https://172.19.0.3:2379,https://172.19.0.4:2379
-controllerManager:
+    etcd-servers: https://172.29.50.52:2379,https://172.29.50.53:2379,https://172.29.50.53:2379
+    # 审计日志相关配置
+    # audit-log-maxage: "20"
+    # audit-log-maxbackup: "10"
+    # audit-log-maxsize: "100"
+    # audit-log-path: "/var/log/kube-audit/audit.log"
+    # audit-policy-file: "/etc/kubernetes/audit-policy.yaml"
+    # authorization-mode: "Node,RBAC"
+    # event-ttl: "720h"
+    # 如果有需要可以覆盖的参数
+    # service-node-port-range: "30000-50000"
+    # service-cluster-ip-range: "10.96.0.0/12"
+
+controllerManager: # https://godoc.org/k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1beta2#ControlPlaneComponent
   extraArgs:
     bind-address: "0.0.0.0"
     experimental-cluster-signing-duration: 87600h        # 证书过期时间修改为10年
@@ -408,6 +430,7 @@ apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration # https://godoc.org/k8s.io/kubelet/config/v1beta1#KubeletConfiguration
 cgroupDriver: systemd
 failSwapOn: true # 如果开启swap则设置为false
+resolvConf: /run/systemd/resolve/resolv.conf
 EOF
 }
 
@@ -427,5 +450,13 @@ EOF
 
 gen_kubeadm_config
 
-
-
+echo "kubeadm-initconfig.yaml has generated."
+echo "now you can execute:"
+echo "kubeadm init --config kubeadm-initconfig.yaml --upload-certs --dry-run"
+echo "to check the plan"
+echo "to init cluster with kubeadm execute on first master:"
+echo "kubeadm init --config kubeadm-initconfig.yaml --upload-certs"
+echo "to clean up:"
+echo "kubeadm reset"
+echo "to upgrade"
+echo "kubeadm upgrade apply --config kubeadm-initconfig.yaml"
