@@ -83,10 +83,6 @@ msg "- param: ${param}"
 msg "- arguments: ${args[*]-}"
 
 
-set_localtime() {
-  ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
-}
-
 apt_install_base_util() {
   apt update && apt install -y \
     apt-transport-https \
@@ -109,9 +105,12 @@ apt_install_base_util() {
     bridge-utils \
     traceroute \
     conntrack \
-    ntp \
     ipvsadm \
     ipset 
+}
+
+set_localtime() {
+  ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 }
 
 remove_docker() {
@@ -149,16 +148,19 @@ apt_install_docker() {
   apt-mark hold docker-ce docker-ce-cli containerd.io
   usermod -aG docker $USER
 
-  mkdir -p /data/docker
+  mkdir -p /etc/docker /data/docker
+  # 注意修改data-root
   bash -c 'cat > /etc/docker/daemon.json <<EOF
 {
   "registry-mirrors": [
       "https://registry.docker-cn.com",
       "http://hub-mirror.c.163.com",
-      "https://v2qkv589.mirror.aliyuncs.com",
+      "https://fz5yth0r.mirror.aliyuncs.com",
       "https://mirror.ccs.tencentyun.com",
       "https://docker.mirrors.ustc.edu.cn",
       "http://f1361db2.m.daocloud.io"
+      "https://dockerhub.mirrors.nwafu.edu.cn/",
+      "https://reg-mirror.qiniu.com",
   ],
   "live-restore": true ,
   "max-concurrent-downloads": 10,
@@ -173,15 +175,34 @@ apt_install_docker() {
 }
 EOF'
 
+# 这段还不完全理解，没有使用。暂时先记录下来。
+# 防止FORWARD的DROP策略影响转发,给docker daemon添加下列参数修正，当然暴力点也可以iptables -P FORWARD ACCEPT
+# mkdir -p /etc/systemd/system/docker.service.d/
+# cat>/etc/systemd/system/docker.service.d/10-docker.conf<<EOF
+# [Service]
+# ExecStartPost=/sbin/iptables --wait -I FORWARD -s 0.0.0.0/0 -j ACCEPT
+# ExecStopPost=/bin/bash -c '/sbin/iptables --wait -D FORWARD -s 0.0.0.0/0 -j ACCEPT &> /dev/null || :'
+# ExecStartPost=/sbin/iptables --wait -I INPUT -i cni0 -j ACCEPT
+# ExecStopPost=/bin/bash -c '/sbin/iptables --wait -D INPUT -i cni0 -j ACCEPT &> /dev/null || :'
+# EOF
+
   systemctl restart docker.service
+  systemctl enable --now docker
 }
 
 apt_install_kubeadm_kubectl() {
-  echo 'deb https://mirrors.aliyun.com/kubernetes/apt/ kubernetes-xenial main' > /etc/apt/sources.list.d/kubernetes.list
-  gpg --keyserver keyserver.ubuntu.com --recv-keys 836F4BEB
-  gpg --export --armor 836F4BEB | sudo apt-key add -
+  # 直接指定key的方法
+  # echo 'deb https://mirrors.aliyun.com/kubernetes/apt/ kubernetes-xenial main' > /etc/apt/sources.list.d/kubernetes.list
+  # gpg --keyserver keyserver.ubuntu.com --recv-keys 836F4BEB
+  # gpg --export --armor 836F4BEB | sudo apt-key add -
+
+  curl https://mirrors.aliyun.com/kubernetes/apt/doc/apt-key.gpg | apt-key add -
+  cat>/etc/apt/sources.list.d/kubernetes.list<<EOF
+deb https://mirrors.aliyun.com/kubernetes/apt/ kubernetes-xenial main
+EOF
   apt update
   apt install -y kubelet=1.19.7-00 kubeadm=1.19.7-00 kubectl=1.19.7-00
+  systemctl enable kubelet
 }
 
 disable_swap() {
@@ -229,11 +250,17 @@ load_module_ipvs() {
 }
 
 load_k8s_sysctl() {
-  cat << EOF | tee /etc/sysctl.d/k8s.conf
+  cat << EOF | tee /etc/sysctl.d/k8s.conf > /dev/null
 # 需要禁止ipv6可以打开
 # net.ipv6.conf.all.disable_ipv6 = 1
 # net.ipv6.conf.default.disable_ipv6 = 1
 # net.ipv6.conf.lo.disable_ipv6 = 1
+
+# 修复ipvs模式下长连接timeout问题 小于900即可
+# https://github.com/moby/moby/issues/31208
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 10
 
 net.ipv4.neigh.default.gc_stale_time = 120
 
@@ -268,16 +295,77 @@ EOF
   sysctl --system
 }
 
+setting_limit() {
+  cat>/etc/security/limits.d/kubernetes.conf<<EOF
+*       soft    nproc   131072
+*       hard    nproc   131072
+*       soft    nofile  131072
+*       hard    nofile  131072
+root    soft    nproc   131072
+root    hard    nproc   131072
+root    soft    nofile  131072
+root    hard    nofile  131072
+EOF
+}
 
-set_localtime
+gen_kubeadm_config() {
+  cat>kubeadm-initconfig.yaml<<EOF
+apiVersion: kubeadm.k8s.io/v1beta2
+bootstrapTokens:
+- groups:
+  - system:bootstrappers:kubeadm:default-node-token
+  token: abcdef.0123456789abcdef
+  ttl: 24h0m0s
+  usages:
+  - signing
+  - authentication
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: 1.2.3.4
+  bindPort: 6443
+nodeRegistration:
+  criSocket: /var/run/dockershim.sock
+  name: node-50
+  taints:
+  - effect: NoSchedule
+    key: node-role.kubernetes.io/master
+---
+apiServer:
+  timeoutForControlPlane: 4m0s
+apiVersion: kubeadm.k8s.io/v1beta2
+certificatesDir: /etc/kubernetes/pki
+clusterName: kubernetes
+controllerManager: {}
+dns:
+  type: CoreDNS
+etcd:
+  local:
+    dataDir: /var/lib/etcd
+imageRepository: k8s.gcr.io
+kind: ClusterConfiguration
+kubernetesVersion: v1.19.7                   # 
+networking:
+  dnsDomain: cluster.local
+  serviceSubnet: 10.96.0.0/12
+scheduler: {}
+EOF
+}
 
-apt_install_base_util
+#apt_install_base_util
+#set_localtime
+
 #remove_docker
-apt_install_docker
-apt_install_kubeadm_kubectl
+#apt_install_docker
+#apt_install_kubeadm_kubectl
 
-disable_swap
-load_module_rke_checks
-load_module_ipvs
-load_k8s_sysctl
+#disable_swap
+#load_module_rke_checks
+#load_module_ipvs
+#load_k8s_sysctl
+
+setting_limit
+
+gen_kubeadm_config
+
+
 
