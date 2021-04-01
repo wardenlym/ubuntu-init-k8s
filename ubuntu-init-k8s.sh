@@ -106,7 +106,8 @@ apt_install_base_util() {
     traceroute \
     conntrack \
     ipvsadm \
-    ipset 
+    ipset \
+    nfs-common
 }
 
 set_localtime() {
